@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator, List
 import json
 from datetime import datetime, timezone
+import asyncio
 
 from app.services.ai_service import generate_answer_with_langchain
 from app.services import neo4j_service
@@ -22,46 +23,91 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
         yield make_progress("⚠️ 未選擇任何文件，將使用全部文件進行檢索。")
         return
 
-    # 圖譜檢索（實體提取）
-    try:
-        yield make_progress("🔍 [圖譜檢索] 正在提取實體...", event_type="graphProgress")
-        entity_model = get_query_entity_extraction_model()
-        if entity_model is None:
-            # No API key configured for Google models; skip entity extraction to avoid ADC fallback
-            yield make_progress("⚠️ [圖譜檢索] 已跳過：未配置 Google API Key，無法執行實體提取。", event_type="graph")
-            graph_results = []
-        else:
+    # --- 並行執行三種檢索（透過事件佇列轉發進度） ---
+    event_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def enqueue_progress(message: str, data=None, event_type: str = "progress") -> None:
+        await event_queue.put(make_progress(message, data, event_type))
+
+    async def run_graph_search() -> List[dict]:
+        try:
+            await enqueue_progress("🔍 [圖譜檢索] 正在提取實體...", event_type="graphProgress")
+            entity_model = get_query_entity_extraction_model()
+            if entity_model is None:
+                await enqueue_progress("⚠️ [圖譜檢索] 已跳過：未配置 Google API Key，無法執行實體提取。", 0, event_type="graph")
+                return []
             extraction_prompt = f"從以下問題中提取出最關鍵的人物、地點、組織或概念等實體。只返回實體名稱。\n問題: \"{question}\""
             extraction_result = await entity_model.ainvoke(extraction_prompt)
+            print(f"[Graph] [OK] 提取到實體: [{', '.join(extraction_result.get('entities') or [])}]")
             entities = [e for e in (extraction_result.get("entities") or []) if e]
-            yield make_progress(f"[圖譜檢索] 提取到實體: [{', '.join(entities)}]，正在檢索...", event_type="progress")
-            graph_results = neo4j_service.retrieve_context_by_entities(entities, selected_file_ids)
-            yield make_progress(f"✅[圖譜檢索] 完成！找到 {len(graph_results)} 個相關結果", len(graph_results), event_type="graph")
-    except Exception as e:
-        yield make_progress(f"❌[圖譜檢索] 發生錯誤: {str(e)}", 0, event_type="graph")
-        graph_results = []
+            await enqueue_progress(f"[圖譜檢索] 提取到實體: [{', '.join(entities)}]，正在檢索...", event_type="progress")
+            graph_results_local = await asyncio.to_thread(
+                neo4j_service.retrieve_context_by_entities, entities, selected_file_ids
+            )
+            await enqueue_progress(
+                f"✅[圖譜檢索] 完成！找到 {len(graph_results_local)} 個相關結果",
+                len(graph_results_local),
+                event_type="graph",
+            )
+            return graph_results_local
+        except Exception as e:
+            await enqueue_progress(f"❌[圖譜檢索] 發生錯誤: {str(e)}", 0, event_type="graph")
+            return []
 
-    # 向量檢索
-    try:
-        yield make_progress("🔍 [向量檢索] 正在生成查詢向量...", event_type="vectorProgress")
-        embeddings = get_embedding_model()
-        query_vector = await embeddings.aembed_query(question.strip())
-        yield make_progress("[向量檢索] 正在檢索圖譜中的向量...")
-        vector_results = neo4j_service.retrieve_graph_context(query_vector, 20, selected_file_ids)
-        yield make_progress(f"✅[向量檢索] 完成！找到 {len(vector_results)} 個相關結果", len(vector_results), event_type="vector")
-    except Exception as e:
-        print(e)
-        yield make_progress(f"❌[向量檢索] 發生錯誤: {str(e)}", 0, event_type="vector")
-        vector_results = []
+    async def run_vector_search() -> List[dict]:
+        try:
+            await enqueue_progress("🔍 [向量檢索] 正在生成查詢向量...", event_type="vectorProgress")
+            embeddings = get_embedding_model()
+            query_vector = await embeddings.aembed_query(question.strip())
+            await enqueue_progress("[向量檢索] 正在檢索圖譜中的向量...")
+            vector_results_local = await asyncio.to_thread(
+                neo4j_service.retrieve_graph_context, query_vector, 20, selected_file_ids
+            )
+            await enqueue_progress(
+                f"✅[向量檢索] 完成！找到 {len(vector_results_local)} 個相關結果",
+                len(vector_results_local),
+                event_type="vector",
+            )
+            return vector_results_local
+        except Exception as e:
+            await enqueue_progress(f"❌[向量檢索] 發生錯誤: {str(e)}", 0, event_type="vector")
+            return []
 
-    # 全文檢索
-    try:
-        yield make_progress("🔍 [全文檢索] 正在執行全文檢索...", event_type="fulltextProgress")
-        fulltext_results = neo4j_service.retrieve_context_by_keywords(question, selected_file_ids)
-        yield make_progress(f"✅[全文檢索] 完成！找到 {len(fulltext_results)} 個相關結果", len(fulltext_results), event_type="fulltext")
-    except Exception as e:
-        yield make_progress(f"❌[全文檢索] 發生錯誤: {str(e)}", 0, event_type="fulltext")
-        fulltext_results = []
+    async def run_fulltext_search() -> List[dict]:
+        try:
+            await enqueue_progress("🔍 [全文檢索] 正在執行全文檢索...", event_type="fulltextProgress")
+            fulltext_results_local = await asyncio.to_thread(
+                neo4j_service.retrieve_context_by_keywords, question, selected_file_ids
+            )
+            await enqueue_progress(
+                f"✅[全文檢索] 完成！找到 {len(fulltext_results_local)} 個相關結果",
+                len(fulltext_results_local),
+                event_type="fulltext",
+            )
+            return fulltext_results_local
+        except Exception as e:
+            await enqueue_progress(f"❌[全文檢索] 發生錯誤: {str(e)}", 0, event_type="fulltext")
+            return []
+
+    graph_task = asyncio.create_task(run_graph_search())
+    vector_task = asyncio.create_task(run_vector_search())
+    fulltext_task = asyncio.create_task(run_fulltext_search())
+
+    # 持續轉發子任務的進度事件，直到三任務結束且佇列清空
+    while True:
+        if graph_task.done() and vector_task.done() and fulltext_task.done() and event_queue.empty():
+            break
+        try:
+            event = event_queue.get_nowait()
+            yield event
+            event_queue.task_done()
+        except asyncio.QueueEmpty:
+            await asyncio.sleep(0.02)
+
+    # 取得子任務結果
+    graph_results = graph_task.result() if not graph_task.cancelled() else []
+    vector_results = vector_task.result() if not vector_task.cancelled() else []
+    fulltext_results = fulltext_task.result() if not fulltext_task.cancelled() else []
 
     combined = {}
     for doc in [*graph_results, *vector_results, *fulltext_results]:
@@ -86,6 +132,7 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
         file_ids.append(md.get("fileId"))
         chunk_ids.append(md.get("chunkId"))
 
+    yield make_progress("🔍 [AI 回應] 正在生成回答...", event_type="aiProgress")
     ai_response = await generate_answer_with_langchain("\n\n".join(formatted_context), question.strip(), file_ids, chunk_ids)
 
     sources = [
@@ -100,6 +147,7 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
         for d in initial_docs
     ]
 
+    yield make_progress("✅ [AI 回應] 完成！", event_type="aiProgress")
     result_payload = {"type": "result", "question": question.strip(), "answer": ai_response.get("answer"), "answer_with_citations": ai_response.get("answer_with_citations") or [], "raw_sources": sources, "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     yield (json.dumps(result_payload) + "\n").encode("utf-8")
 
