@@ -11,3 +11,4 @@ langchain-core>=0.2.38
 langchain-google-genai>=1.0.7
 langchain-text-splitters>=0.2.2
 pypdf==4.3.1
+markdownify>=1.2.0

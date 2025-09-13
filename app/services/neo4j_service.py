@@ -264,12 +264,43 @@ def delete_file(file_id: str) -> Dict[str, Any]:
             if not record:
                 raise RuntimeError("檔案不存在")
             deleted_props = record["d"]._properties  # type: ignore
+            # 1) 刪除該文件的所有 Chunk（及其 MENTIONS 關係）
+            tx.run(
+                """
+                MATCH (d:Document {id: $fileId})-[:HAS_CHUNK]->(c:Chunk)
+                DETACH DELETE c
+                """,
+                fileId=file_id,
+            )
+            # 2) 刪除文件節點本身
             tx.run(
                 """
                 MATCH (d:Document {id: $fileId})
                 DETACH DELETE d
                 """,
                 fileId=file_id,
+            )
+            # 3) 清理已失去支撐的實體-實體關係（沒有任何同一 chunk 同時提及兩端點的關係）
+            tx.run(
+                """
+                MATCH (a)-[r]->(b)
+                WHERE type(r) <> 'HAS_CHUNK' AND type(r) <> 'MENTIONS'
+                AND NOT EXISTS {
+                    MATCH (c:Chunk)-[:MENTIONS]->(a)
+                    WITH c
+                    MATCH (c)-[:MENTIONS]->(b)
+                }
+                DELETE r
+                """
+            )
+            # 4) 清理不再被任何 Chunk 提及的孤立實體
+            tx.run(
+                """
+                MATCH (e)
+                WHERE NOT e:Document AND NOT e:Chunk
+                AND NOT EXISTS { MATCH (:Chunk)-[:MENTIONS]->(e) }
+                DETACH DELETE e
+                """
             )
             tx.commit()
             return {

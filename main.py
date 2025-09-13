@@ -7,6 +7,7 @@ from app.services import neo4j_service
 from app.routers.upload import router as upload_router
 from app.routers.files_neo4j import router as files_router
 from app.routers.query_stream import router as query_router
+from app.routers.sse import router as sse_router
 
 
 def create_app() -> FastAPI:
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     app.include_router(upload_router)
     app.include_router(files_router , prefix="/neo4j")
     app.include_router(query_router, prefix="/api")
+    app.include_router(sse_router)
 
     # Optional root (keep existing behavior for direct calls)
     app.include_router(query_router)
