@@ -245,8 +245,6 @@ async def process_website_and_create_graph(*, url: str, client_id: Optional[str]
         raise RuntimeError("抓取結果為空，無法處理")
 
     # 2) 準備單一 Document 的原始文件資訊
-    parsed = urlparse(url)
-    doc_name = (parsed.netloc or "website").strip()
     size = len(markdown.encode("utf-8"))
     file_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
 
@@ -365,6 +363,7 @@ async def process_website_and_create_graph(*, url: str, client_id: Optional[str]
         chunk_text = chunk.get("pageContent", "")
         meta = chunk.get("metadata", {}) or {}
         page_no = meta.get("pageNumber")
+        print(f"[Graph] [Start] 任務 {idx + 1}/{total_tasks} (頁 {page_no}) len={len(chunk_text)}")
         attempts = 0
         backoff_base = 1.0
         while attempts < MAX_RETRIES_PER_TASK:
@@ -379,14 +378,25 @@ async def process_website_and_create_graph(*, url: str, client_id: Optional[str]
                 all_extractions[idx] = res or {"entities": [], "relationships": []}
                 async with _completed_lock:
                     _completed += 1
+                    print(f"[Graph] [OK] 任務 {idx + 1}/{total_tasks} (頁 {page_no}) -> 完成 {_completed}/{total_tasks}")
                     await publish_progress(client_id, {"type": "progress", "done": _completed, "total": total_with_db})
                 return
             except Exception as err:
+                err_text = str(err)
+                retry_delay_match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", err_text)
+                delay_seconds = backoff_base * (2 ** attempts)
+                if retry_delay_match:
+                    try:
+                        delay_seconds = max(delay_seconds, float(retry_delay_match.group(1)))
+                    except Exception:
+                        pass
+                print(f"[Graph] [Retry] 任務 {idx + 1}/{total_tasks} (頁 {page_no}) 第 {attempts + 1} 次，等待 {delay_seconds:.1f}s; 錯誤: {err}")
                 if not switch_to_next_key():
                     attempts += 1
-                await asyncio.sleep(backoff_base * (2 ** attempts))
+                await asyncio.sleep(delay_seconds)
 
         all_extractions[idx] = {"entities": [], "relationships": []}
+        print(f"[Graph] [Fail] 任務 {idx + 1}/{total_tasks} (頁 {page_no})，已達最大重試")
         async with _completed_lock:
             _completed += 1
             await publish_progress(client_id, {"type": "progress", "done": _completed, "total": total_with_db})
@@ -411,8 +421,9 @@ async def process_website_and_create_graph(*, url: str, client_id: Optional[str]
         for i, c in enumerate(chunks)
     ]
 
-    document_data = {"name": doc_name, "size": size, "hash": file_hash, "mimetype": "text/markdown"}
+    document_data = {"name": url, "size": size, "hash": file_hash, "mimetype": "text/markdown"}
     result = neo4j_service.create_graph_from_document(document_data, chunks_with_graph)
+    print(f"[Graph] 檔案 {url} 已成功建立圖譜，文件節點 ID: {result['fileId']}")
     await publish_progress(client_id, {"type": "progress", "done": total_with_db, "total": total_with_db})
     await publish_progress(client_id, {"type": "finished", "fileId": result["fileId"], "chunks": len(chunks)})
     return {
