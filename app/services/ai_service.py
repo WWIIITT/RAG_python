@@ -22,19 +22,24 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
                                 "properties": {
                                     "segment_text": {"type": "string"},
                                     "segment_type": {"type": "string", "enum": ["answer_text", "quoted_content", "analysis"]},
-                                    "source_reference": {
-                                        "type": "object",
-                                        "properties": {
-                                            "source_file": {"type": "string"},
-                                            "file_id": {"type": "string", "enum": context_with_file_id},
-                                            "file_chunk_id": {"type": "string", "enum": chunk_ids},
-                                            "page_number": {"type": "string"},
-                                            "source_index": {"type": "number"},
+                                    "source_references": {
+                                        "type": "array",
+                                        "description": "此段落使用的所有來源（可以有多個）",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "source_file": {"type": "string"},
+                                                "file_id": {"type": "string", "enum": context_with_file_id},
+                                                "file_chunk_id": {"type": "string", "enum": chunk_ids},
+                                                "page_number": {"type": "string"},
+                                                "source_index": {"type": "number"},
+                                            },
+                                            "required": ["source_file", "file_id", "file_chunk_id", "page_number", "source_index"],
                                         },
-                                        "required": ["source_file", "file_id", "file_chunk_id", "page_number", "source_index"],
+                                        "minItems": 1,
                                     },
                                 },
-                                "required": ["segment_text", "segment_type", "source_reference"],
+                                "required": ["segment_text", "segment_type", "source_references"],
                             },
                         }
                     },
@@ -98,6 +103,7 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
             raise RuntimeError("[ApiKeyManager] 沒有可用的 API Key。")
         try:
             response = await model.ainvoke(prompt)
+            print(response)
             return response
         except Exception as err:
             last_error = err

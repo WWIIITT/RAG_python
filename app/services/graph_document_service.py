@@ -27,7 +27,7 @@ text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=40
 async def _invoke_model(model, prompt: str) -> Dict[str, Any]:
     return await model.ainvoke(prompt)
 
-
+'''
 def _split_docs_into_chunks(docs: List[Dict[str, Any]], renumber_page_by_chunk: bool = False) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     for d in docs:
@@ -42,7 +42,7 @@ def _split_docs_into_chunks(docs: List[Dict[str, Any]], renumber_page_by_chunk: 
             for chunk_text in parts:
                 chunks.append({"pageContent": chunk_text, "metadata": d.get("metadata", {})})
     return chunks
-
+'''
 
 async def _embed_chunks_with_retry(chunks: List[Dict[str, Any]]) -> List[List[float]]:
     BATCH_SIZE = 30
@@ -240,12 +240,16 @@ async def process_and_create_graph(*, filename: str, content: bytes, size: int, 
         raise RuntimeError("設定錯誤：請在 .env 中提供 GOOGLE_API_KEY_LIST。")
 
     all_vectors = await _embed_chunks_with_retry(chunks)
-    all_extractions = await _extract_graph_with_progress(chunks, client_id, total_with_db)
+    # Graph extraction disabled - only using vectors now
+    # all_extractions = await _extract_graph_with_progress(chunks, client_id, total_with_db)
+    all_extractions = [{"entities": [], "relationships": []} for _ in chunks]
+    
     chunks_with_graph = _assemble_chunks_with_graph(chunks, all_vectors, all_extractions)
 
     document_data = {"name": filename, "size": size, "hash": file_hash, "mimetype": mimetype}
     result = neo4j_service.create_graph_from_document(document_data, chunks_with_graph)
     print(f"[Graph] 檔案 {filename} 已成功建立圖譜，文件節點 ID: {result['fileId']}")
+    
     # 入庫完成，補發最終進度（達 100%）
     await publish_progress(client_id, {"type": "progress", "done": total_with_db, "total": total_with_db})
     await publish_progress(client_id, {"type": "finished", "fileId": result["fileId"], "chunks": len(chunks)})
@@ -308,7 +312,9 @@ async def process_website_and_create_graph(*, url: str, client_id: Optional[str]
 
     # 4) 生成向量與 5) 圖譜抽取（使用共用實作）
     all_vectors = await _embed_chunks_with_retry(chunks)
-    all_extractions = await _extract_graph_with_progress(chunks, client_id, total_with_db)
+    # Graph extraction disabled - only using vectors now
+    # all_extractions = await _extract_graph_with_progress(chunks, client_id, total_with_db)
+    all_extractions = [{"entities": [], "relationships": []} for _ in chunks]
     
     # 6) 組裝與入庫
     chunks_with_graph = _assemble_chunks_with_graph(chunks, all_vectors, all_extractions)

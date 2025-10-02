@@ -30,26 +30,31 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
         await event_queue.put(make_progress(message, data, event_type))
 
     async def run_graph_search() -> List[dict]:
+        # Graph search disabled - only using vector search now
         try:
-            await enqueue_progress("🔍 [圖譜檢索] 正在提取實體...", event_type="graphProgress")
-            entity_model = get_query_entity_extraction_model()
-            if entity_model is None:
-                await enqueue_progress("⚠️ [圖譜檢索] 已跳過：未配置 Google API Key，無法執行實體提取。", 0, event_type="graph")
-                return []
-            extraction_prompt = f"從以下問題中提取出最關鍵的人物、地點、組織或概念等實體。只返回實體名稱。\n問題: \"{question}\""
-            extraction_result = await entity_model.ainvoke(extraction_prompt)
-            print(f"[Graph] [OK] 提取到實體: [{', '.join(extraction_result.get('entities') or [])}]")
-            entities = [e for e in (extraction_result.get("entities") or []) if e]
-            await enqueue_progress(f"[圖譜檢索] 提取到實體: [{', '.join(entities)}]，正在檢索...", event_type="progress")
-            graph_results_local = await asyncio.to_thread(
-                neo4j_service.retrieve_context_by_entities, entities, selected_file_ids
-            )
-            await enqueue_progress(
-                f"✅[圖譜檢索] 完成！找到 {len(graph_results_local)} 個相關結果",
-                len(graph_results_local),
-                event_type="graph",
-            )
-            return graph_results_local
+            await enqueue_progress("⚠️ [圖譜檢索] 已跳過：圖譜檢索功能已停用，僅使用向量檢索。", 0, event_type="graph")
+            return []
+            
+            # Original graph search code (disabled):
+            # await enqueue_progress("🔍 [圖譜檢索] 正在提取實體...", event_type="graphProgress")
+            # entity_model = get_query_entity_extraction_model()
+            # if entity_model is None:
+            #     await enqueue_progress("⚠️ [圖譜檢索] 已跳過：未配置 Google API Key，無法執行實體提取。", 0, event_type="graph")
+            #     return []
+            # extraction_prompt = f"從以下問題中提取出最關鍵的人物、地點、組織或概念等實體。只返回實體名稱。\n問題: \"{question}\""
+            # extraction_result = await entity_model.ainvoke(extraction_prompt)
+            # print(f"[Graph] [OK] 提取到實體: [{', '.join(extraction_result.get('entities') or [])}]")
+            # entities = [e for e in (extraction_result.get("entities") or []) if e]
+            # await enqueue_progress(f"[圖譜檢索] 提取到實體: [{', '.join(entities)}]，正在檢索...", event_type="progress")
+            # graph_results_local = await asyncio.to_thread(
+            #     neo4j_service.retrieve_context_by_entities, entities, selected_file_ids
+            # )
+            # await enqueue_progress(
+            #     f"✅[圖譜檢索] 完成！找到 {len(graph_results_local)} 個相關結果",
+            #     len(graph_results_local),
+            #     event_type="graph",
+            # )
+            # return graph_results_local
         except Exception as e:
             await enqueue_progress(f"❌[圖譜檢索] 發生錯誤: {str(e)}", 0, event_type="graph")
             return []
@@ -109,12 +114,72 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
     vector_results = vector_task.result() if not vector_task.cancelled() else []
     fulltext_results = fulltext_task.result() if not fulltext_task.cancelled() else []
 
-    combined = {}
-    for doc in [*graph_results, *vector_results, *fulltext_results]:
-        if doc and doc.get("chunkId"):
-            combined[doc["chunkId"]] = doc
-    initial_docs = list(combined.values())
-    yield make_progress(f"✅ 融合去重完成！共得到 {len(initial_docs)} 個候選文檔", len(initial_docs), event_type="merge")
+    # 使用 RRF (Reciprocal Rank Fusion) 算法融合多個檢索結果
+    def reciprocal_rank_fusion(results_list: List[List[dict]], k: int = 60) -> List[dict]:
+        """
+        使用 RRF 算法融合多個檢索結果
+        
+        RRF 公式: score(d) = Σ 1/(k + rank_r(d))
+        - 在多個檢索源中都出現的文檔會得到更高分數
+        - 不需要歸一化不同檢索源的分數
+        
+        Args:
+            results_list: 多個檢索源的結果列表（已按相關性排序）
+            k: RRF 常數，用於平滑分數（默認 60）
+        
+        Returns:
+            按 RRF 分數排序的文檔列表
+        """
+        rrf_scores = {}
+        
+        # 遍歷每個檢索源
+        for results in results_list:
+            if not results:
+                continue
+            # 遍歷該檢索源的每個文檔及其排名（從 1 開始）
+            for rank, doc in enumerate(results, start=1):
+                chunk_id = doc.get("chunkId")
+                if not chunk_id:
+                    continue
+                
+                # 計算 RRF 分數：1 / (k + rank)
+                score = 1.0 / (k + rank)
+                
+                # 累加到該文檔的總 RRF 分數
+                if chunk_id not in rrf_scores:
+                    rrf_scores[chunk_id] = {
+                        "doc": doc,
+                        "rrf_score": 0.0,
+                        "sources": []
+                    }
+                rrf_scores[chunk_id]["rrf_score"] += score
+                rrf_scores[chunk_id]["sources"].append({"rank": rank, "score": score})
+        
+        # 按 RRF 分數降序排序
+        sorted_docs = sorted(
+            rrf_scores.values(),
+            key=lambda x: x["rrf_score"],
+            reverse=True
+        )
+        
+        # 返回文檔列表（添加 RRF 分數到文檔中）
+        return [
+            {**item["doc"], "rrf_score": round(item["rrf_score"], 4)}
+            for item in sorted_docs
+        ]
+    
+    # 使用 RRF 融合三種檢索結果
+    initial_docs = reciprocal_rank_fusion([
+        graph_results,
+        vector_results,
+        fulltext_results
+    ], k=60)
+    
+    yield make_progress(
+        f"✅ RRF 融合完成！共得到 {len(initial_docs)} 個候選文檔（已按相關性重排序）", 
+        len(initial_docs), 
+        event_type="merge"
+    )
 
     if not initial_docs:
         result_payload = {"type": "result", "question": question, "answer": "抱歉，在您指定的文件中找不到任何相關資訊。", "answer_with_citations": [], "raw_sources": [], "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
@@ -134,6 +199,7 @@ async def sse_event_stream(question: str, selected_file_ids: List[str]) -> Async
 
     yield make_progress("🔍 [AI 回應] 正在生成回答...", event_type="aiProgress")
     ai_response = await generate_answer_with_langchain("\n\n".join(formatted_context), question.strip(), file_ids, chunk_ids)
+    print(ai_response)
 
     sources = [
         {
