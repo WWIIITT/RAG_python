@@ -34,3 +34,14 @@ async def get_file_details(file_id: str):
         if str(e) == "檔案不存在":
             raise HTTPException(status_code=404, detail={"error": "檔案不存在", "details": str(e)})
         raise HTTPException(status_code=500, detail={"error": "獲取檔案詳細資訊失敗", "details": str(e)})
+
+
+@router.get("/chunks/{chunk_id}/source-details")
+async def get_chunk_source_details(chunk_id: str):
+    try:
+        details = neo4j_service.get_source_details_by_chunk_id(chunk_id)
+        return {"message": "來源資訊獲取成功", "details": details}
+    except Exception as e:
+        if str(e) == "找不到 chunk":
+            raise HTTPException(status_code=404, detail={"error": "找不到對應的 chunk", "details": str(e)})
+        raise HTTPException(status_code=500, detail={"error": "獲取來源資訊失敗", "details": str(e)})

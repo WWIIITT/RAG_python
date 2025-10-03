@@ -350,3 +350,32 @@ def get_specific_file(file_id: str) -> Dict[str, Any]:
             for c in raw_chunks
         ]
         return {"file": formatted_file, "chunks": formatted_chunks}
+
+
+def get_source_details_by_chunk_id(chunk_id: str) -> Dict[str, Any]:
+    driver = get_driver()
+    with driver.session(database=get_settings().neo4j_database) as session:
+        result = session.run(
+            """
+            MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk {id: $chunkId})
+            WITH d, c
+            MATCH (d)-[:HAS_CHUNK]->(o:Chunk)
+            WHERE o.pageNumber <= c.pageNumber
+            RETURN d.id AS fileId,
+                   d.name AS sourceFile,
+                   c.pageNumber AS pageNumber,
+                   c.id AS chunkId,
+                   count(o) - 1 AS sourceIndex
+            """,
+            chunkId=chunk_id,
+        )
+        record = result.single()
+        if not record:
+            raise RuntimeError("找不到 chunk")
+        return {
+            "file_id": record["fileId"],
+            "page_number": record["pageNumber"],
+            "source_index": int(record["sourceIndex"]) if record["sourceIndex"] is not None else None,
+            "source_file": record["sourceFile"],
+            "file_chunk_id": record["chunkId"],
+        }

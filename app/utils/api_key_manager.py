@@ -100,6 +100,7 @@ def get_answer_generation_model(schema, options=None) -> Optional[ChatGoogleGene
     api_key = _keys[_index]
     temperature = (options or {}).get("temperature", 0.7)
     thinking_budget = (options or {}).get("thinking_budget", 0)  # Default: 0 for faster responses
+    max_output_tokens = (options or {}).get("max_output_tokens", 2000)  # Default: 8192 tokens
     
     # Control thinking budget - lower value = faster responses (range: 1024-8192)
     # Set to 1024 for fastest, 8192 for most thoughtful responses
@@ -113,6 +114,7 @@ def get_answer_generation_model(schema, options=None) -> Optional[ChatGoogleGene
         model=get_settings().google_ai_model or "gemini-2.5-flash", 
         api_key=api_key, 
         temperature=temperature,
+        max_output_tokens=max_output_tokens,  # Control output length
         model_kwargs=model_kwargs
     )
     print(base)

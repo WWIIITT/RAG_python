@@ -8,7 +8,7 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
         "title": "answer_generation_schema",
         "type": "object",
         "properties": {
-            "answer": {"type": "string", "description": "完整的回答（Markdown格式）"},
+            #"answer": {"type": "string", "description": "完整的回答（Markdown格式）"},
             "answer_with_citations": {
                 "type": "array",
                 "description": "帶有引用標記的回答段落",
@@ -21,25 +21,26 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
                                 "type": "object",
                                 "properties": {
                                     "segment_text": {"type": "string"},
-                                    "segment_type": {"type": "string", "enum": ["answer_text", "quoted_content", "analysis"]},
+                                    #"segment_type": {"type": "string", "enum": ["answer_text", "quoted_content", "analysis"]},
                                     "source_references": {
                                         "type": "array",
                                         "description": "此段落使用的所有來源（可以有多個）",
                                         "items": {
                                             "type": "object",
                                             "properties": {
-                                                "source_file": {"type": "string"},
-                                                "file_id": {"type": "string", "enum": context_with_file_id},
+                                                #"source_file": {"type": "string"},
+                                                #"file_id": {"type": "string", "enum": context_with_file_id},
                                                 "file_chunk_id": {"type": "string", "enum": chunk_ids},
-                                                "page_number": {"type": "string"},
-                                                "source_index": {"type": "number"},
+                                                #"page_number": {"type": "string"},
+                                                #"source_index": {"type": "number"},
                                             },
-                                            "required": ["source_file", "file_id", "file_chunk_id", "page_number", "source_index"],
+                                            #"required": ["source_file", "file_id", "file_chunk_id", "page_number", "source_index"],
+                                            "required": [ "file_chunk_id"],
                                         },
-                                        "minItems": 1,
                                     },
                                 },
-                                "required": ["segment_text", "segment_type", "source_references"],
+                                #"required": ["segment_text", "segment_type", "source_references"],
+                                "required": ["segment_text", "source_references"],
                             },
                         }
                     },
@@ -47,7 +48,8 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
                 },
             },
         },
-        "required": ["answer", "answer_with_citations"],
+        "required": ["answer_with_citations"],
+        #"required": ["answer", "answer_with_citations"],
     }
 
     prompt = f"""
@@ -70,22 +72,8 @@ async def generate_answer_with_langchain(context: str, question: str, context_wi
         - 使用減號或星號來創建列表項目
         - 使用反引號包圍技術名詞，如程式語言名稱
 
-        **重要：完整的來源追蹤**
-        對於 answer_with_citations 陣列中的每個 content_segment，無論 segment_type 是什麼：
-        
-        1. **answer_text 類型**：
-           - segment_text 必須使用 Markdown 格式
-           - 必須提供準確的 source_file、page_number、source_index、file_id 和 file_chunk_id
-           
-        2. **quoted_content 類型**：
-           - segment_text 使用 Markdown 引用格式
-           - 必須提供準確的 source_file、page_number、source_index、file_id 和 file_chunk_id
 
-        3. **analysis 類型**：
-           - segment_text 使用 Markdown 格式進行分析說明
-           - 必須提供準確的 source_file、page_number、source_index、file_id 和 file_chunk_id
-
-        **每個片段都必須有完整的來源資訊，不允許遺漏任何欄位**
+        - `file_chunk_id` 必須嚴格從提供的候選 `chunk_ids` 中選擇（可以有多個）。
 
     內容:
     {context}
